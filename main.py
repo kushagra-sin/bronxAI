@@ -1,100 +1,120 @@
+# --- main.py for FastAPI (Revised for TFLite) ---
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel # For input validation
+import tensorflow as tf # Still need TensorFlow to load TFLite interpreter
 import numpy as np
-import tflite_runtime.interpreter as tflite
-from typing import List
+from scipy import signal as scipy_signal # Use alias to avoid conflict with `signal` module
+import os # For checking file existence
 
+# Initialize FastAPI
 app = FastAPI(
-    title="ECG Classification API",
-    description="AI-powered ECG signal classifier (Raw Signal Input)",
-    version="3.0.0"
+    title="ECG Classification API (TFLite)",
+    description="AI-powered ECG signal classifier for 1D raw data using TensorFlow Lite",
+    version="1.0.2" # Updated version number
 )
 
+# Enable CORS for frontend access (adjust allow_origins for production)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # For development, allow all. In production, specify your frontend URL, e.g., ["https://your-frontend.com"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Load TFLite model
-MODEL_PATH = 'ecg_classifier_300hz.tflite'
+# --- Model and Label Loading ---
+# IMPORTANT: These files MUST be in the same directory as this main.py when deployed.
+TFLITE_MODEL_PATH = 'ecg_classifier_300hz.tflite'
 LABELS_PATH = 'label_classes.npy'
 
-print("Loading TFLite model...")
-interpreter = tflite.Interpreter(model_path=MODEL_PATH)
-interpreter.allocate_tensors()
+# Ensure model and labels exist before attempting to load
+if not os.path.exists(TFLITE_MODEL_PATH):
+    raise FileNotFoundError(f"TFLite model file not found at {TFLITE_MODEL_PATH}. Make sure it's uploaded.")
+if not os.path.exists(LABELS_PATH):
+    raise FileNotFoundError(f"Labels file not found at {LABELS_PATH}. Make sure it's uploaded.")
 
-# Get input and output details
+print("Loading TensorFlow Lite model...")
+interpreter = tf.lite.Interpreter(model_path=TFLITE_MODEL_PATH)
+interpreter.allocate_tensors() # Allocate tensors before inference
+print("✓ TFLite Interpreter loaded!")
+
+# Get input and output tensor details
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-# Load labels
 label_classes = np.load(LABELS_PATH, allow_pickle=True)
-print(f"✓ Model loaded! Classes: {label_classes}")
+print(f"✓ Label classes loaded! Classes: {label_classes.tolist()}")
 
-# Expected input configuration
-EXPECTED_SAMPLES = 3000  # 10 seconds at 300Hz
-EXPECTED_FS = 300  # Hz
+# --- Configuration for Preprocessing (MUST MATCH TRAINING) ---
+TARGET_LENGTH = 3000 # 10 seconds * 300 Hz (from your Colab script)
+ORIGINAL_FS = 300    # Original sampling frequency of PhysioNet data / expected input to API
 
-# Request model
-class ECGSignalRequest(BaseModel):
-    signal: List[float]
-    sample_rate: int = 300
-    duration: float = 10.0
-    source: str = "unknown"
-
-def preprocess_signal(signal_data, target_length=3000):
+# --- Signal Preprocessing Function (MATCHES YOUR COLAB TRAINING) ---
+def preprocess_signal_for_inference(signal_data, target_length=TARGET_LENGTH, fs=ORIGINAL_FS):
     """
-    Preprocess signal for model inference
+    Preprocess ECG signal for inference.
+    This must exactly match the `preprocess_signal` function used during Colab training.
     """
     signal_array = np.array(signal_data, dtype=np.float32)
-    
-    # Ensure correct length
-    if len(signal_array) < target_length:
-        # Pad with edge values
-        signal_array = np.pad(signal_array, (0, target_length - len(signal_array)), mode='edge')
-    elif len(signal_array) > target_length:
-        # Truncate
-        signal_array = signal_array[:target_length]
-    
-    # Ensure normalization (model expects normalized input)
-    if np.std(signal_array) > 0:
-        signal_normalized = (signal_array - np.mean(signal_array)) / np.std(signal_array)
-    else:
-        signal_normalized = signal_array
-    
-    # Reshape for model: (1, 3000, 1)
-    signal_reshaped = signal_normalized.reshape(1, target_length, 1).astype(np.float32)
-    
-    return signal_reshaped
 
-def classify_ecg_signal(signal_data):
-    """
-    Classify ECG signal using TFLite model
-    """
-    # Preprocess
-    processed_signal = preprocess_signal(signal_data, target_length=EXPECTED_SAMPLES)
+    # 1. Bandpass filter (0.5-40 Hz)
+    nyquist = 0.5 * fs
+    low = 0.5 / nyquist
+    high = 40 / nyquist
+    b, a = scipy_signal.butter(4, [low, high], btype='band')
+    filtered_signal = scipy_signal.filtfilt(b, a, signal_array)
     
-    # Set input tensor
-    interpreter.set_tensor(input_details[0]['index'], processed_signal)
+    # 2. Normalize to [-1, 1]
+    min_val = np.min(filtered_signal)
+    max_val = np.max(filtered_signal)
+    if (max_val - min_val) > 1e-6: # Avoid division by zero
+        normalized = 2 * (filtered_signal - min_val) / (max_val - min_val) - 1
+    else:
+        normalized = filtered_signal * 0 # If flat, set all to 0
+    
+    # 3. Pad or truncate to target length
+    if len(normalized) < target_length:
+        padded = np.pad(normalized, (0, target_length - len(normalized)), mode='constant')
+    elif len(normalized) > target_length:
+        padded = normalized[:target_length]
+    else:
+        padded = normalized
+        
+    return padded
+
+# --- Prediction Function ---
+def classify_ecg(signal_data_1d):
+    """
+    Classify a single preprocessed 1D ECG signal using the TFLite interpreter.
+    """
+    # TFLite models expect specific data types, typically float32
+    input_shape = input_details[0]['shape'] # e.g., [1, 3000, 1]
+    input_dtype = input_details[0]['dtype'] # e.g., float32
+
+    # Reshape for TFLite model input: (1, timesteps, features=1)
+    # Ensure the data type matches what the TFLite model expects
+    signal_reshaped = signal_data_1d.reshape(input_shape).astype(input_dtype)
+    
+    # Set the tensor to the input data
+    interpreter.set_tensor(input_details[0]['index'], signal_reshaped)
     
     # Run inference
     interpreter.invoke()
     
-    # Get output
-    prediction = interpreter.get_tensor(output_details[0]['index'])[0]
+    # Get the output tensor
+    prediction_raw = interpreter.get_tensor(output_details[0]['index'])
     
-    # Get results
-    class_idx = np.argmax(prediction)
-    confidence = float(prediction[class_idx])
+    # Get class probabilities and predicted class
+    prediction_probs = prediction_raw[0] # TFLite output usually has batch dim 1
+    class_idx = np.argmax(prediction_probs)
+    
     predicted_class = label_classes[class_idx]
+    confidence = float(prediction_probs[class_idx])
     
-    # All probabilities
+    # Get all probabilities as a dictionary
     probabilities = {
-        label_classes[i]: float(prediction[i])
+        label_classes[i]: float(prediction_probs[i])
         for i in range(len(label_classes))
     }
     
@@ -104,125 +124,61 @@ def classify_ecg_signal(signal_data):
         'probabilities': probabilities
     }
 
+# --- Pydantic Model for Input Validation ---
+class ECGSignalInput(BaseModel):
+    signal: list[float] # Expects a list of floats
+
 # ============================================================================
 # API ENDPOINTS
 # ============================================================================
 
 @app.get("/")
 async def root():
-    """API information"""
+    """Health check endpoint and basic info."""
     return {
         "status": "online",
-        "message": "ECG Classification API (TFLite - Raw Signal)",
-        "version": "3.0.0",
-        "model_type": "1D CNN TensorFlow Lite",
-        "input_format": "Raw signal array (3000 samples at 300Hz)",
-        "classes": label_classes.tolist(),
-        "expected_input": {
-            "samples": EXPECTED_SAMPLES,
-            "sample_rate": f"{EXPECTED_FS} Hz",
-            "duration": f"{EXPECTED_SAMPLES/EXPECTED_FS} seconds"
-        }
+        "message": "ECG Classification API is running (TFLite Backend)",
+        "version": "1.0.2",
+        "model_classes": label_classes.tolist(),
+        "expected_signal_length_after_preprocessing": TARGET_LENGTH,
+        "note": "Send raw 1D ECG data to /predict_signal endpoint."
     }
 
-@app.get("/health")
-async def health_check():
-    """Detailed health check"""
-    return {
-        "status": "healthy",
-        "model_loaded": True,
-        "classes": label_classes.tolist(),
-        "expected_samples": EXPECTED_SAMPLES,
-        "sample_rate": EXPECTED_FS
-    }
-
-@app.post("/predict")
-async def predict_ecg(request: ECGSignalRequest):
+@app.post("/predict_signal")
+async def predict_ecg_signal(ecg_input: ECGSignalInput):
     """
-    Classify ECG signal from raw data
-    
-    Parameters:
-    - signal: List of float values (ECG samples)
-    - sample_rate: Sampling frequency (should be 300 Hz)
-    - duration: Duration in seconds
-    - source: Source identifier (e.g., "AD8232_sensor")
-    
-    Returns:
-    - prediction: Predicted class
-    - confidence: Confidence score (0-1)
-    - probabilities: Probability for each class
+    Endpoint to receive raw 1D ECG signal data (list of floats) and return classification.
+    The client (your local Python script) should perform denoising and initial resampling
+    to 300Hz before sending.
+    The API will then perform final padding/truncation to 3000 samples and normalization.
     """
     try:
-        # Validate input
-        if len(request.signal) < 100:
-            raise HTTPException(
-                status_code=400,
-                detail="Signal too short. Need at least 100 samples."
-            )
+        raw_signal_from_client = ecg_input.signal
         
-        if request.sample_rate != EXPECTED_FS:
-            print(f"Warning: Expected {EXPECTED_FS}Hz, got {request.sample_rate}Hz. Resampling may be needed.")
+        # Preprocess the signal, matching the training pipeline
+        processed_signal = preprocess_signal_for_inference(raw_signal_from_client, target_length=TARGET_LENGTH, fs=ORIGINAL_FS)
         
-        # Classify
-        result = classify_ecg_signal(request.signal)
+        # Classify the preprocessed signal
+        result = classify_ecg(processed_signal)
         
         return {
             "success": True,
-            "source": request.source,
-            "input_info": {
-                "samples_received": len(request.signal),
-                "sample_rate": request.sample_rate,
-                "duration": request.duration
-            },
             "result": result,
-            "message": "Classification successful"
+            "received_signal_length": len(raw_signal_from_client),
+            "processed_signal_length_for_model_input": len(processed_signal)
         }
         
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Classification error: {str(e)}"
-        )
-
-@app.post("/predict_batch")
-async def predict_batch(signals: List[ECGSignalRequest]):
-    """
-    Classify multiple ECG signals
-    """
-    try:
-        results = []
-        
-        for idx, signal_request in enumerate(signals):
-            try:
-                result = classify_ecg_signal(signal_request.signal)
-                results.append({
-                    "index": idx,
-                    "success": True,
-                    "result": result
-                })
-            except Exception as e:
-                results.append({
-                    "index": idx,
-                    "success": False,
-                    "error": str(e)
-                })
-        
-        return {
-            "success": True,
-            "total_signals": len(signals),
-            "results": results
-        }
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Batch processing error: {str(e)}"
-        )
+        import traceback
+        traceback.print_exc() # Print full traceback for server-side debugging
+        raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}. Check signal format and preprocessing.")
 
 # ============================================================================
-# RUN SERVER
+# RUN SERVER (for local testing)
 # ============================================================================
 
 if __name__ == "__main__":
     import uvicorn
+    # For local testing, run: python main.py
+    # Then open http://127.0.0.1:8000/docs in your browser to see the API docs.
     uvicorn.run(app, host="0.0.0.0", port=8000)
