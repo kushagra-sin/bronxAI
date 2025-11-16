@@ -9,3 +9,22 @@ scipy==1.11.4
 # or remove pin and let pip choose the latest compatible Pydantic 2.x
 pydantic==1.10.13 # Or pydantic==2.5.3 if numpy 1.26.x makes it compatible. Let's try 1.x for now.
 tensorflow==2.20.0
+
+# Flask Web Framework
+Flask==3.0.0
+Werkzeug==3.0.1
+
+# WSGI Server for Production (Render deployment)
+gunicorn==21.2.0
+
+# Optional: CORS support for cross-origin requests
+flask-cors==4.0.0
+
+# Optional: API rate limiting
+Flask-Limiter==3.5.0
+
+# Optional: Request validation
+flask-restful==0.3.10
+
+# Optional: Better logging
+python-json-logger==2.0.7
