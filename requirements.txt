@@ -1,13 +1,11 @@
-# --- requirements.txt ---
+# --- requirements.txt (Recommended Option A) ---
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
-numpy==1.24.3
+# Pin numpy to a version known to be compatible with TensorFlow 2.20.0 for Python 3.10
+# TensorFlow 2.x typically works well with numpy 1.25.x or 1.26.x
+numpy==1.26.4
 scipy==1.11.4
-pydantic==2.5.3
-# Use tensorflow-cpu for smaller footprint if not using GPU,
-# or tflite-runtime if available.
-# For simplicity and guaranteed interpreter access, stick with full TensorFlow
-# or tensorflow-cpu which includes the TFLite interpreter.
+# Pin pydantic to a slightly older 1.x version, as 2.x can have stricter Python/numpy requirements
+# or remove pin and let pip choose the latest compatible Pydantic 2.x
+pydantic==1.10.13 # Or pydantic==2.5.3 if numpy 1.26.x makes it compatible. Let's try 1.x for now.
 tensorflow==2.20.0
-# Alternatively, if you want a truly minimal runtime (might be harder to install on Render):
-#tflite-runtime==2.20.0 # <--- Use this IF you can get it to install. Otherwise, use tensorflow.
