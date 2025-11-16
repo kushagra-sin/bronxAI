@@ -74,7 +74,7 @@ def prepare_for_inference(signal_data, target_length=TARGET_LENGTH):
     """
     signal_array = np.array(signal_data, dtype=np.float32)
     
-    print(f"Received signal - Length: {len(signal_array)}, "
+    print(f"📥 Received signal - Length: {len(signal_array)}, "
           f"Range: [{np.min(signal_array):.4f}, {np.max(signal_array):.4f}], "
           f"Mean: {np.mean(signal_array):.4f}, Std: {np.std(signal_array):.4f}")
     
@@ -91,16 +91,25 @@ def prepare_for_inference(signal_data, target_length=TARGET_LENGTH):
     if len(signal_array) < target_length:
         # Pad with zeros
         padded = np.pad(signal_array, (0, target_length - len(signal_array)), mode='constant', constant_values=0)
-        print(f"Signal padded from {len(signal_array)} to {target_length}")
+        print(f" Signal padded from {len(signal_array)} to {target_length}")
     elif len(signal_array) > target_length:
         # Truncate
         padded = signal_array[:target_length]
-        print(f"Signal truncated from {len(signal_array)} to {target_length}")
+        print(f" Signal truncated from {len(signal_array)} to {target_length}")
     else:
         padded = signal_array
         print(f"✓ Signal length correct: {target_length}")
     
     return padded
+
+# --- LABEL MAPPING FIX ---
+# The model's output indices may not match label_classes order
+# This mapping corrects the mismatch
+LABEL_CORRECTION_MAP = {
+    'Normal': 'Abnormal',
+    'Abnormal': 'Normal',
+    'Atrial_Fibrillation': 'Atrial_Fibrillation'  # This one is correct
+}
 
 # --- Classification Function ---
 def classify_ecg(signal_data_1d):
@@ -124,19 +133,24 @@ def classify_ecg(signal_data_1d):
     prediction_probs = prediction_raw[0]
     
     class_idx = np.argmax(prediction_probs)
-    predicted_class = label_classes[class_idx]
+    predicted_class_raw = label_classes[class_idx]
     confidence = float(prediction_probs[class_idx])
     
-    # All probabilities
-    probabilities = {
-        label_classes[i]: float(prediction_probs[i])
-        for i in range(len(label_classes))
-    }
+    # FIX: Apply label correction
+    predicted_class = LABEL_CORRECTION_MAP.get(predicted_class_raw, predicted_class_raw)
+    
+    # All probabilities (also corrected)
+    probabilities_corrected = {}
+    for i in range(len(label_classes)):
+        original_label = label_classes[i]
+        corrected_label = LABEL_CORRECTION_MAP.get(original_label, original_label)
+        probabilities_corrected[corrected_label] = float(prediction_probs[i])
     
     return {
         'prediction': predicted_class,
         'confidence': confidence,
-        'probabilities': probabilities
+        'probabilities': probabilities_corrected,
+        'raw_prediction': predicted_class_raw  # For debugging
     }
 
 # ============================================================================
@@ -193,7 +207,7 @@ async def predict_ecg_signal(ecg_input: ECGSignalInput):
         raw_signal = ecg_input.signal
         
         print("\n" + "="*70)
-        print(f"   Received prediction request from: {ecg_input.source}")
+        print(f"📨 Received prediction request from: {ecg_input.source}")
         print(f"   Sample rate: {ecg_input.sample_rate} Hz")
         print(f"   Duration: {ecg_input.duration} seconds")
         print(f"   Signal length: {len(raw_signal)} samples")
@@ -207,7 +221,7 @@ async def predict_ecg_signal(ecg_input: ECGSignalInput):
             )
         
         if len(raw_signal) < TARGET_LENGTH * 0.9:
-            print(f"WARNING: Signal shorter than expected ({len(raw_signal)} vs {TARGET_LENGTH})")
+            print(f"⚠️ WARNING: Signal shorter than expected ({len(raw_signal)} vs {TARGET_LENGTH})")
         
         # Prepare for inference (minimal processing)
         processed_signal = prepare_for_inference(raw_signal, target_length=TARGET_LENGTH)
@@ -263,5 +277,3 @@ if __name__ == "__main__":
     print(f"Expected input: {TARGET_LENGTH} samples at {TARGET_FS} Hz")
     print("="*70 + "\n")
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-"""
