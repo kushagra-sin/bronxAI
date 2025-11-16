@@ -10,4 +10,4 @@ pydantic==2.5.3
 # or tensorflow-cpu which includes the TFLite interpreter.
 tensorflow==2.20.0
 # Alternatively, if you want a truly minimal runtime (might be harder to install on Render):
-tflite-runtime==2.20.0 # <--- Use this IF you can get it to install. Otherwise, use tensorflow.
+#tflite-runtime==2.20.0 # <--- Use this IF you can get it to install. Otherwise, use tensorflow.
